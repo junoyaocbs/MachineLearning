@@ -1,0 +1,182 @@
+'''
+The website I'm scrapping is: 'https://www.sofang.com'. This is one of the two biggest websites for (residential) 
+property info (new and second-hand). The other one is 'www.fang.com'.
+'''
+
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
+import random
+import re
+import time
+from tqdm import tqdm
+pd.set_option('display.max_rows', 500)
+
+'''
+I used professional IP Proxy service for this project. Simply connect to the server here if you are using one too.
+The service provider I used: 'dyn.horocn.com'.
+If you do not use a proxy service, chances are you won't be able to run this set of codes which keeps on revisiting the website, 
+hence creating traffic. Nevertheless, delete the 'proxies=proxies' in line 39/97 if you still want to try running the codes.
+'''
+
+########################################################
+
+'''
+In this case we are interested in the nation-wide new residential property market, and aim to build a landbank organized by the 
+location (province-city-district) of the listed property. Hence we start with getting a full list of cities following the logic
+of Sofang.
+Note that there are many levels/tiers of cities in Mainland China. Therefore it's important that we adopt the city list of the 
+target website instead of using our own. We could always do a matching afterwards.
+'''
+
+def GetCities(url):
+    print('Running operations...')
+    t0 = time.time() #record the start time
+    
+    # parse dedicated url
+    header = {"User-Agent":UserAgent().random,'Connection': 'close'} #setup header
+    res = requests.get(url, proxies=proxies, headers=header, timeout=5) 
+    soup = BeautifulSoup(res.text, 'html.parser')
+    
+    # Level 1 cities:
+    citylist1 = pd.DataFrame()
+    for item in soup.find('div',class_='citys1').find_all('a'):
+        row = [item.get_text(), item.get('href')]
+        row = pd.DataFrame(row).transpose()
+        citylist1 = citylist1.append(row)
+    citylist1 = citylist1.reset_index(drop=True)
+
+    # Level 1 provinces and SARs ( HK, Macau, Taiwan):
+    citylist2 = pd.DataFrame()
+    for item in soup.find('tr', class_='lienli').find_all('a'):
+        row = [item.get_text(), item.get('href')]
+        row = pd.DataFrame(row).transpose()
+        citylist2 = citylist2.append(row)
+    citylist2 = citylist2.reset_index(drop=True)
+
+    # concate both lists:
+    citylist = pd.concat([citylist1,citylist2])
+    citylist = citylist.reset_index(drop=True)
+    citylist.columns = ['City','CityUrl']
+    
+    t1 = time.time() #record the end time
+    print('Operation completed in', t1-t0, 's!')
+    return citylist
+    
+cityUrl = 'https://www.sofang.com/country.html'
+cities = GetCities(cityUrl)   
+
+'''
+We're interested in the new properties so we add a suffix to the links to each city:
+'''
+cities['NewPostUrl'] = cities.CityUrl + '/new/area'
+print("There are ",len(cities),"cities by Sofang definition.")
+
+########################################################
+
+'''
+Now that we have a list of cities and the links to the website where new properties located in each one of them is posted, 
+we then read each city link and obtain the links to all the properties for each city.
+Note that if you only need the price info, you don't necessarily have to go into each property postings where much richer data 
+are displayed. This is because price info is often displayed beside the name of the property on the city-level websites. It's 
+important to figure out the webpage structure and granularity of data for your project.
+'''
+
+def NewProperty(data):
+    print('Running operations...')
+    t0 = time.time()
+    
+    properties = pd.DataFrame(columns=['City','CityUrl','Url'])
+    error_dict = {}
+    for i in tqdm(range(len(data))):
+        city = data.loc[i,'City']
+        url = data.loc[i,'NewPostUrl']
+        try:
+            header = {"User-Agent":UserAgent().random,'Connection': 'close'} #setup header
+            resp = requests.get(url, proxies=proxies, headers=header, timeout=10)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+
+            page_range = list()
+            for item in soup.find_all('a', {'class':'page'}):
+                page = item.get_text()
+                try:
+                    page = int(page)
+                    page_range.append(page)
+                except Exception as e:
+                    continue
+            max_page = max(page_range)
+            pages = pd.DataFrame(columns=['Page','Url'])
+            pages.Page = list(range(1,max_page+1))
+            pages.Page = pages.Page.astype(str)
+            pages.Url = url+'/bl'+pages.Page+'?'
+
+            to_append = pd.DataFrame()
+            to_append['PageUrl'] = pages.Url
+            to_append['City'] = city
+            to_append['CityUrl'] = url
+            properties = properties.append(to_append)
+            
+        except Exception as e:
+                error = {city:url}
+                error_dict.update(error)
+                continue        
+    
+    t1 = time.time()
+    print('Operations completed in', t1-t0, 's!')
+    return properties, error_dict
+
+def NewPropertyUrl(data):
+    print('Running operations...')
+    t0 = time.time()
+    
+    properties = pd.DataFrame()
+    error_dict = {}
+    for i in tqdm(range(len(data))):
+        city = data.loc[i,'City']
+        city_url = data.loc[i,'CityUrl']
+        url = data.loc[i,'PageUrl']
+        
+        try:
+            header = {"User-Agent":UserAgent().random,'Connection': 'close'} #setup header
+            resp = requests.get(url, proxies=proxies, headers=header, timeout=10)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+
+            for listing in soup.find_all('a', class_="iinfoa"):
+                row = [city,city_url,url,listing.get_text(),listing.get('href')]
+                row = pd.DataFrame(row).transpose()
+                row.columns = ['City','CityUrl','PageUrl','Property','Url']
+                properties = properties.append(row)
+        
+        except Exception as e:
+                error = {city:url}
+                error_dict.update(error)
+                continue
+                
+    properties.Url = properties.CityUrl.str.replace('/new/area','')+properties.Url 
+    properties = properties.reset_index(drop=True)
+                
+    t1 = time.time()
+    print('Operations completed in', t1-t0, 's!')
+    return properties, error_dict
+    
+    def MoreInfo(data):
+    property_aux = pd.DataFrame()
+    for row in range(len(data)):
+        city = data.loc[row,'City']
+        city_url = data.loc[row,'CityUrl']
+        page_url = data.loc[row,'PageUrl']
+        prop = data.loc[row,'Property']
+        url = data.loc[row,'Url']
+        
+        city_url_str = data.iloc[row,:].CityUrl
+        city_url_str = city_url_str.replace('new/area','')
+        property_url_str = data.iloc[row,:].Url
+        index = property_url_str.find('xinfindex')+10
+        end = property_url_str[index:]
+        property_aux_url = [city,city_url,page_url,prop,property_url_str,city_url_str+'xinfxq/'+end]
+        row = pd.DataFrame(property_aux_url).transpose()
+        property_aux = property_aux.append(row)
+    property_aux = property_aux.rename(columns={0:'City',1:'CityUrl',2:'PageUrl',3:'Property',4:'PropertyUrl',5:'MoreUrl'})
+    property_aux = property_aux.reset_index(drop=True)
+    return property_aux
